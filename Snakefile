@@ -34,6 +34,7 @@ meraculous_threads = 50
 bbduk_container = 'shub://TomHarrop/singularity-containers:bbmap_38.00'
 r_container = 'shub://TomHarrop/singularity-containers:r_3.5.0'
 mer_container = 'shub://TomHarrop/singularity-containers:meraculous_2.2.6'
+spades_container = 'shub://TomHarrop/singularity-containers:spades_3.12.0'
 
 ########
 # MAIN #
@@ -59,7 +60,37 @@ rule target:
         #         'meraculous_final_results/final.scaffolds.fa'),
         #        sample=all_samples),
         expand('output/040_norm/{sample}_kmer_plot.pdf',
+               sample=all_samples),
+        expand('output/040_norm/{sample}_kmer_plot.pdf',
                sample=all_samples)
+
+
+# run a meraculous assembly for each indiv
+rule spades:
+    input:
+        fq = 'output/030_bbsplit-csd/{sample}.fq.gz'
+    output:
+        'output/060_spades/{sample}/scaffolds.fasta'
+    params:
+        outdir = 'output/060_spades/{sample}'
+    threads:
+        meraculous_threads
+    priority:
+        10
+    log:
+        'output/000_logs/060_spades/{sample}.log'
+    benchmark:
+        'output/000_benchmarks/060_spades/{sample}.tsv'
+    singularity:
+        spades_container
+    shell:
+        'spades.py '
+        '-t {threads} '
+        # '--careful '
+        '--pe1-12 {input.fq} '
+        '-o {params.outdir} '
+        '&> {log}'
+
 
 # run a meraculous assembly for each indiv
 rule meraculous:
