@@ -35,6 +35,9 @@ bbduk_container = 'shub://TomHarrop/singularity-containers:bbmap_38.00'
 r_container = 'shub://TomHarrop/singularity-containers:r_3.5.0'
 mer_container = 'shub://TomHarrop/singularity-containers:meraculous_2.2.6'
 spades_container = 'shub://TomHarrop/singularity-containers:spades_3.12.0'
+freebayes_container = 'shub://TomHarrop/singularity-containers:freebayes_1.2.0'
+bwa_container = 'shub://TomHarrop/singularity-containers:bwa_0.7.17'
+sambamba_container = 'shub://TomHarrop/singularity-containers:sambamba_0.6.8'
 
 ########
 # MAIN #
@@ -62,8 +65,101 @@ rule target:
         expand('output/040_norm/{sample}_kmer_plot.pdf',
                sample=all_samples),
         expand('output/040_norm/{sample}_kmer_plot.pdf',
-               sample=all_samples)
+               sample=all_samples),
+        expand('output/070_bwa/{sample}_marked.bam',
+               sample=all_samples),
 
+
+# mark duplicates
+rule markdup:
+    input:
+        'output/070_bwa/{sample}.sam'
+    output:
+        bam = temp('output/070_bwa/{sample}.bam'),
+        sorted = temp('output/070_bwa/{sample}_sorted.bam'),
+        marked = 'output/070_bwa/{sample}_marked.bam'
+    threads:
+        meraculous_threads
+    priority:
+        100
+    log:
+        s = 'output/000_logs/070_bwa/{sample}_sort.log',
+        m = 'output/000_logs/070_bwa/{sample}_markdup.log'
+    benchmark:
+        'output/000_benchmarks/070_bwa/{sample}_markdup.tsv'
+    singularity:
+        sambamba_container
+    shell:
+        'sambamba view '
+        '-S '
+        '-f bam '
+        '-t {threads} '
+        '{input} '
+        '> {output.bam} '
+        '; '
+        'sambamba sort '
+        '-o {output.sorted} '
+        '-t {threads} '
+        '{output.bam} '
+        '2> {log.s} '
+        '; '
+        'sambamba markdup '
+        '-t {threads} '
+        '{output.sorted} '
+        '{output.marked} '
+        '2> {log.m}'
+
+# map each individual to reference contig
+rule bwa:
+    input:
+        fq = 'output/040_norm/{sample}.fq.gz',
+        index = expand('output/070_bwa/csd.fasta.{suffix}',
+                       suffix=['amb', 'ann', 'bwt', 'pac', 'sa'])
+    output:
+        'output/070_bwa/{sample}.sam'
+    params:
+        prefix = 'output/070_bwa/csd.fasta',
+        rg = '\'@RG\\tID:{sample}\\tSM:{sample}\''
+    threads:
+        meraculous_threads
+    log:
+        'output/000_logs/070_bwa/{sample}.log'
+    benchmark:
+        'output/000_benchmarks/070_bwa/{sample}.tsv'
+    singularity:
+        bwa_container
+    shell:
+        'bwa mem '
+        '-t {threads} '
+        '-p '
+        '-R {params.rg} '
+        '{params.prefix} '
+        '{input.fq} '
+        '> {output} '
+        '2> {log}'
+
+
+rule index:
+    input:
+        csd_locus_fasta
+    output:
+        expand('output/070_bwa/csd.fasta.{suffix}',
+               suffix=['amb', 'ann', 'bwt', 'pac', 'sa'])
+    params:
+        prefix = 'output/070_bwa/csd.fasta'
+    threads:
+        1
+    log:
+        'output/000_logs/070_bwa/index.log'
+    benchmark:
+        'output/000_benchmarks/070_bwa/index.tsv'
+    singularity:
+        bwa_container
+    shell:
+        'bwa index '
+        '-p {params.prefix} '
+        '{input} '
+        '2> {log}'
 
 # run a meraculous assembly for each indiv
 rule spades:
