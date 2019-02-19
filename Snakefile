@@ -47,6 +47,9 @@ sambamba_container = 'shub://TomHarrop/singularity-containers:sambamba_0.6.8'
 run_info = pandas.read_csv(run_info_file)
 all_samples = sorted(set(run_info['SampleName']))
 
+# TEMPORARY # subset samples to get the pipeline to run quickly
+all_samples = [x for x in all_samples if x.startswith('REUd')]
+
 # read the meraculous config
 with open(meraculous_config_file, 'rt') as f:
     meraculous_config_string = ''.join(f.readlines())
