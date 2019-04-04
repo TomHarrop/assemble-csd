@@ -2,6 +2,7 @@
 
 import pandas
 import pathlib2
+import multiprocessing
 
 
 #############
@@ -20,12 +21,21 @@ def write_config_file(fastq, threads, config_string, config_file):
     return True
 
 
+def read_goi_exons(goi_exons_file):
+    csv = pandas.read_csv(goi_exons_file)
+    region_list = ['--region {0}:{1}-{2}'.format(
+        row[1][0], row[1][1], row[1][2])
+        for row in csv.iterrows()]
+    return(' '.join(region_list))
+
+
 ###########
 # GLOBALS #
 ###########
 
 run_info_file = 'data/SraRunInfo.csv'
 csd_locus_fasta = 'data/csd.fasta'
+honeybee_ref = 'data/GCF_003254395.2_Amel_HAv3.1_genomic.fna'
 bbduk_ref = '/sequencing_artifacts.fa.gz'
 bbduk_adaptors = '/adapters.fa'
 meraculous_config_file = 'src/meraculous_config.txt'
@@ -37,7 +47,9 @@ mer_container = 'shub://TomHarrop/singularity-containers:meraculous_2.2.6'
 spades_container = 'shub://TomHarrop/singularity-containers:spades_3.12.0'
 freebayes_container = 'shub://TomHarrop/singularity-containers:freebayes_1.2.0'
 bwa_container = 'shub://TomHarrop/singularity-containers:bwa_0.7.17'
-sambamba_container = 'shub://TomHarrop/singularity-containers:sambamba_0.6.8'
+samtools_container = 'shub://TomHarrop/singularity-containers:samtools_1.9'
+vcflib_container = 'shub://TomHarrop/singularity-containers:vcflib_1.0.0-rc2'
+bioc_container = 'shub://TomHarrop/singularity-containers:bioconductor_3.7'
 
 ########
 # MAIN #
@@ -48,7 +60,7 @@ run_info = pandas.read_csv(run_info_file)
 all_samples = sorted(set(run_info['SampleName']))
 
 # TEMPORARY # subset samples to get the pipeline to run quickly
-all_samples = [x for x in all_samples if x.startswith('REUd')]
+# all_samples = [x for x in all_samples if x.startswith('REUd')]
 
 # read the meraculous config
 with open(meraculous_config_file, 'rt') as f:
@@ -65,49 +77,123 @@ rule target:
         #         '{sample}/'
         #         'meraculous_final_results/final.scaffolds.fa'),
         #        sample=all_samples),
-        expand('output/040_norm/{sample}_kmer_plot.pdf',
-               sample=all_samples),
-        expand('output/040_norm/{sample}_kmer_plot.pdf',
-               sample=all_samples),
-        expand('output/070_bwa/{sample}_marked.bam',
-               sample=all_samples),
+        # expand('output/040_norm/{sample}_kmer_plot.pdf',
+        #        sample=all_samples),
+        # expand('output/040_norm/{sample}_kmer_plot.pdf',
+        #        sample=all_samples),
+        # expand('output/070_bwa/{sample}_marked.bam',
+        #        sample=all_samples),
+        'output/080_freebayes/variants_filtered.vcf'
 
+# run freebayes
+rule filter_vcf:
+    input:
+        'output/080_freebayes/variants.vcf'
+    output:
+        'output/080_freebayes/variants_filtered.vcf'
+    params:
+        filter = "QUAL > 100"
+    log:
+        'output/000_logs/080_freebayes/freebayes_filter.log'
+    singularity:
+        vcflib_container
+    shell:
+        'vcffilter -f "{params.filter}" {input} > {output} 2> {log}'
+
+
+rule freebayes:
+    input:
+        bam = expand('output/070_bwa/{sample}_marked.bam',
+                     sample=all_samples),
+        bai = expand('output/070_bwa/{sample}_marked.bam.bai',
+                     sample=all_samples),
+        fa = honeybee_ref,
+        goi_exons = 'output/080_freebayes/goi_exons.csv'
+    output:
+        vcf = 'output/080_freebayes/variants.vcf'
+    params:
+        ploidy = '1',
+        region = lambda wildcards, input: read_goi_exons(input.goi_exons)
+    log:
+        'output/000_logs/080_freebayes/freebayes.log'
+    benchmark:
+        'output/000_benchmarks/080_freebayes/freebayes.tsv'
+    singularity:
+        freebayes_container
+    shell:
+        'freebayes '
+        '{params.region} '
+        '--ploidy {params.ploidy} '
+        '-f {input.fa} '
+        '{input.bam} '
+        '> {output} '
+        '2> {log}'
+
+rule extract_goi_exons:
+    input:
+        gff = ('data/GCF_003254395.2_Amel_HAv3.'
+               '1_genomic.cds-exon-mrna-gene.gff3'),
+    output:
+        goi_exons = 'output/080_freebayes/goi_exons.csv'
+    params:
+        goi = 'XM_026439432.1'  # CSD transcript ID
+    log:
+        'output/000_logs/080_freebayes/extract_goi_exons.log'
+    singularity:
+        bioc_container
+    script:
+        'src/extract_goi_exons.R'
 
 # mark duplicates
+rule index_bamfile:
+    input:
+        'output/070_bwa/{sample}_marked.bam'
+    output:
+        'output/070_bwa/{sample}_marked.bam.bai'
+    log:
+        'output/000_logs/070_bwa/{sample}_index.log',
+    threads:
+        2
+    singularity:
+        samtools_container
+    shell:
+        'samtools index -@ {threads} {input} 2> {log}'
+
 rule markdup:
     input:
         'output/070_bwa/{sample}.sam'
     output:
-        bam = temp('output/070_bwa/{sample}.bam'),
         sorted = temp('output/070_bwa/{sample}_sorted.bam'),
         marked = 'output/070_bwa/{sample}_marked.bam'
     threads:
-        meraculous_threads
-    priority:
-        100
+        5
     log:
         s = 'output/000_logs/070_bwa/{sample}_sort.log',
         m = 'output/000_logs/070_bwa/{sample}_markdup.log'
     benchmark:
         'output/000_benchmarks/070_bwa/{sample}_markdup.tsv'
     singularity:
-        sambamba_container
+        samtools_container
     shell:
-        'sambamba view '
-        '-S '
-        '-f bam '
-        '-t {threads} '
+        'samtools fixmate '
+        '-m '
+        '-O BAM '
+        '-@ {threads} '
         '{input} '
-        '> {output.bam} '
-        '; '
-        'sambamba sort '
-        '-o {output.sorted} '
-        '-t {threads} '
-        '{output.bam} '
+        '- '
         '2> {log.s} '
+        '| '
+        'samtools sort '
+        '-o {output.sorted} '
+        '-O BAM '
+        '-l 0 '
+        '-@ {threads} '
+        '- '
+        '2>> {log.s} '
         '; '
-        'sambamba markdup '
-        '-t {threads} '
+        'samtools markdup '
+        '-@ {threads} '
+        '-s '
         '{output.sorted} '
         '{output.marked} '
         '2> {log.m}'
@@ -115,16 +201,16 @@ rule markdup:
 # map each individual to reference contig
 rule bwa:
     input:
-        fq = 'output/040_norm/{sample}.fq.gz',
-        index = expand('output/070_bwa/csd.fasta.{suffix}',
+        fq = 'output/010_trim-decon/{sample}.fq.gz',
+        index = expand('output/070_bwa/honeybee_ref.fasta.{suffix}',
                        suffix=['amb', 'ann', 'bwt', 'pac', 'sa'])
     output:
         'output/070_bwa/{sample}.sam'
     params:
-        prefix = 'output/070_bwa/csd.fasta',
+        prefix = 'output/070_bwa/honeybee_ref.fasta',
         rg = '\'@RG\\tID:{sample}\\tSM:{sample}\''
     threads:
-        meraculous_threads
+        multiprocessing.cpu_count()
     log:
         'output/000_logs/070_bwa/{sample}.log'
     benchmark:
@@ -144,12 +230,12 @@ rule bwa:
 
 rule index:
     input:
-        csd_locus_fasta
+        honeybee_ref
     output:
-        expand('output/070_bwa/csd.fasta.{suffix}',
+        expand('output/070_bwa/honeybee_ref.fasta.{suffix}',
                suffix=['amb', 'ann', 'bwt', 'pac', 'sa'])
     params:
-        prefix = 'output/070_bwa/csd.fasta'
+        prefix = 'output/070_bwa/honeybee_ref.fasta'
     threads:
         1
     log:
